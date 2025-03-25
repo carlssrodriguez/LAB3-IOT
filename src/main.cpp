@@ -1,93 +1,83 @@
 #include <WiFi.h>
 #include <HttpClient.h>
+#include <Wire.h>
+#include <Adafruit_AHTX0.h>
 
-// Replace with your network credentials
-char ssid[] = "BLVD63";
-char pass[] = "sdBLVD63";
+// Sensor
+Adafruit_AHTX0 aht;
 
-// HTTP server configuration
-const char kHostname[] = "example.com";
-const char kPath[] = "/";
-const int kPort = 80;
+// WiFi credentials
+const char ssid[] = "mondi";
+const char pass[] = "123456789";
 
-// Timeout settings
-const int kNetworkTimeout = 30000; // 30 seconds
-const int kNetworkDelay = 1000;    // 1 second
+// AWS Flask server
+const char kHostname[] = "54.177.211.80";
+const int kPort = 5000;
 
 void setup() {
   Serial.begin(115200);
   delay(1000);
 
-  Serial.println();
   Serial.println("Connecting to WiFi...");
-  WiFi.begin(ssid, pass);
+  
+  // Set DNS manually (in case default fails)
+  IPAddress primaryDNS(8, 8, 8, 8);
+  IPAddress secondaryDNS(8, 8, 4, 4);
+  WiFi.config(INADDR_NONE, INADDR_NONE, INADDR_NONE, primaryDNS, secondaryDNS);
 
+  WiFi.begin(ssid, pass);
   while (WiFi.status() != WL_CONNECTED) {
     delay(500);
     Serial.print(".");
   }
 
   Serial.println("\nWiFi connected");
-  Serial.print("IP address: ");
+  Serial.print("Local IP: ");
   Serial.println(WiFi.localIP());
-  Serial.print("MAC address: ");
-  Serial.println(WiFi.macAddress());
+
+  // I2C for ESP32: SDA 21, SCL 22
+  Wire.begin(21, 22);
+  if (!aht.begin()) {
+    Serial.println("AHT20 sensor not detected. Check wiring.");
+    while (1);
+  }
+  Serial.println("AHT20 sensor detected.");
 }
 
 void loop() {
-  int err = 0;
+  sensors_event_t humidity, temp;
+  aht.getEvent(&humidity, &temp);
+
+  float t = temp.temperature;
+  float h = humidity.relative_humidity;
+
+  Serial.printf(" Temp: %.2f °C | Humidity: %.2f %%\n", t, h);
+
+  // Format HTTP path
+  String path = "/?var=Temp:" + String(t) + "-Hum:" + String(h);
 
   WiFiClient client;
+  client.setTimeout(15000); // Avoid connection drops
   HttpClient http(client);
 
-  Serial.println("\nSending HTTP request...");
-
-  err = http.get(kHostname, kPort, kPath);
+  Serial.println("Sending data to server...");
+  int err = http.get(kHostname, kPort, path.c_str());
 
   if (err == 0) {
-    Serial.println("Request started successfully.");
+    Serial.println("Request sent.");
+    int statusCode = http.responseStatusCode();
+    Serial.printf("Status code: %d\n", statusCode);
 
-    err = http.responseStatusCode();
-    if (err >= 0) {
-      Serial.print("Response status code: ");
-      Serial.println(err);
-
-      err = http.skipResponseHeaders();
-      if (err >= 0) {
-        int bodyLen = http.contentLength();
-        Serial.print("Content length: ");
-        Serial.println(bodyLen);
-        Serial.println("Response body:");
-
-        unsigned long timeoutStart = millis();
-        char c;
-
-        while ((http.connected() || http.available()) &&
-               ((millis() - timeoutStart) < kNetworkTimeout)) {
-          if (http.available()) {
-            c = http.read();
-            Serial.print(c);
-            bodyLen--;
-            timeoutStart = millis();
-          } else {
-            delay(kNetworkDelay);
-          }
-        }
-      } else {
-        Serial.print("Failed to skip response headers: ");
-        Serial.println(err);
-      }
-    } else {
-      Serial.print("Invalid response code: ");
-      Serial.println(err);
+    http.skipResponseHeaders();
+    while (http.available()) {
+      char c = http.read();
+      Serial.print(c);
     }
   } else {
-    Serial.print("Connection failed: ");
-    Serial.println(err);
+    Serial.printf("Connection error: %d\n", err);
   }
 
   http.stop();
-  Serial.println("Connection closed.");
-
-  while (1); // Stop execution after first request
+  Serial.println("Waiting 10 seconds...\n");
+  delay(10000);
 }
